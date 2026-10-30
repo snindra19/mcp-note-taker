@@ -9,8 +9,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from templates_config import DEFAULT_TEMPLATE
+
 NOTES_FILE = Path(__file__).resolve().parent / "notes.json"
-DEFAULT_TEMPLATE = "blank"
 REQUIRED_NOTE_FIELDS = ("id", "title", "body", "template", "created_at", "updated_at")
 
 # Flask handles requests on several threads, so each read-change-write

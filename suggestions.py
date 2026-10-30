@@ -378,8 +378,16 @@ def build_link_suggestion(url: str) -> dict:
     }
 
 
-def build_suggestions(body: str, today: date | None = None, dismissed_ids: list[str] | None = None) -> list[dict]:
-    """Return up to MAX_SUGGESTIONS suggestions for a note body, in text order."""
+def build_suggestions(
+    body: str,
+    today: date | None = None,
+    dismissed_ids: list[str] | None = None,
+    enabled_types: list[str] | None = None,
+) -> list[dict]:
+    """Return up to MAX_SUGGESTIONS suggestions for a note body, in text order.
+
+    If enabled_types is given, only suggestions of those types are returned.
+    """
     if today is None:
         today = date.today()
 
@@ -396,13 +404,15 @@ def build_suggestions(body: str, today: date | None = None, dismissed_ids: list[
         candidates.append((city_start, build_weather_suggestion(city, weather_date)))
     candidates.sort(key=lambda candidate: candidate[0])
 
-    # These ids are skipped before the limit, so hidden ones don't use up a slot.
+    # These are skipped before the limit, so hidden ones don't use up a slot.
     skipped_ids = find_existing_ids(enhancements_text)
     skipped_ids.update(dismissed_ids or [])
 
     # Keep the first of each suggestion, up to the limit.
     suggestions = []
     for _, suggestion in candidates:
+        if enabled_types is not None and suggestion["type"] not in enabled_types:
+            continue
         if suggestion["id"] in skipped_ids:
             continue
         skipped_ids.add(suggestion["id"])

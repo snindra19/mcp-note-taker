@@ -8,6 +8,7 @@ import link_safety
 import mcp_client
 import notes_store
 import suggestions
+import templates_config
 
 MAX_TITLE_LENGTH = 200
 MAX_BODY_LENGTH = 20000
@@ -62,6 +63,8 @@ def index():
         max_title_length=MAX_TITLE_LENGTH,
         max_body_length=MAX_BODY_LENGTH,
         max_city_length=MAX_CITY_LENGTH,
+        templates=templates_config.list_templates_for_page(),
+        default_template=templates_config.DEFAULT_TEMPLATE,
     )
 
 
@@ -74,11 +77,16 @@ def list_notes():
 @app.route("/api/notes", methods=["POST"])
 def create_note():
     """Validate the request and create a note."""
-    title, body, error = validate_note_input(request.get_json(silent=True))
+    data = request.get_json(silent=True)
+    title, body, error = validate_note_input(data)
     if error:
         return jsonify({"error": error}), 400
 
-    new_note = notes_store.create_note(title, body)
+    template_name = data.get("template", templates_config.DEFAULT_TEMPLATE)
+    if not isinstance(template_name, str) or not templates_config.is_known_template(template_name):
+        return jsonify({"error": "Unknown template."}), 400
+
+    new_note = notes_store.create_note(title, body, template_name)
     return jsonify(new_note), 201
 
 
@@ -228,8 +236,11 @@ def get_suggestions():
 
     text = data.get("text", "")
     dismissed_ids = data.get("dismissed", [])
+    template_name = data.get("template", templates_config.DEFAULT_TEMPLATE)
     if not isinstance(text, str):
         return jsonify({"error": "Text must be text."}), 400
+    if not isinstance(template_name, str):
+        return jsonify({"error": "Template must be text."}), 400
     if len(text) > MAX_BODY_LENGTH:
         return jsonify({"error": f"Text must be at most {MAX_BODY_LENGTH} characters."}), 400
     if not isinstance(dismissed_ids, list):
@@ -240,7 +251,12 @@ def get_suggestions():
         if not isinstance(dismissed_id, str):
             return jsonify({"error": "Dismissed must be a list of text."}), 400
 
-    return jsonify({"suggestions": suggestions.build_suggestions(text, dismissed_ids=dismissed_ids)})
+    found_suggestions = suggestions.build_suggestions(
+        text,
+        dismissed_ids=dismissed_ids,
+        enabled_types=templates_config.get_enabled_suggestion_types(template_name),
+    )
+    return jsonify({"suggestions": found_suggestions})
 
 
 @app.errorhandler(500)

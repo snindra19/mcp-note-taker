@@ -11,11 +11,13 @@
     .layout { display: flex; height: calc(100vh - 47px); }
     .sidebar { width: 280px; flex-shrink: 0; padding: 12px; overflow-y: auto; background: #fff; border-right: 1px solid #ccc; }
     .editor { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 16px; min-width: 0; overflow-y: auto; }
+    #template-select { display: block; width: 100%; margin-top: 8px; padding: 8px; font: inherit; }
     #note-list { list-style: none; margin: 12px 0 0; padding: 0; }
     #note-list button { width: 100%; padding: 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; background: none; border: none; border-bottom: 1px solid #eee; cursor: pointer; }
     #note-list button:hover { background: #eef3f6; }
     #note-list button.selected { font-weight: bold; background: #dbe7ee; }
     label { font-size: 14px; font-weight: bold; }
+    #template-label { margin-left: 8px; font-size: 13px; color: #555; }
     input, textarea { width: 100%; padding: 8px; font: inherit; border: 1px solid #aaa; border-radius: 4px; }
     .body-field { flex: 1; display: flex; flex-direction: column; gap: 4px; min-height: 180px; }
     textarea { flex: 1; resize: none; }
@@ -44,11 +46,18 @@
   <div class="layout">
     <aside class="sidebar">
       <button id="new-button" type="button">New</button>
+      <select id="template-select" aria-label="New from template">
+        <option value="">New from template...</option>
+        {% for template in templates %}
+        <option value="{{ template.name }}">{{ template.label }}</option>
+        {% endfor %}
+      </select>
       <ul id="note-list"></ul>
     </aside>
     <main class="editor">
       <div>
         <label for="note-title">Title</label>
+        <span id="template-label"></span>
         <input id="note-title" type="text" maxlength="{{ max_title_length }}">
       </div>
       <div class="body-field">
@@ -96,6 +105,11 @@
     const previewHeading = document.getElementById("preview-heading");
     const previewText = document.getElementById("preview-text");
 
+    const templateSelect = document.getElementById("template-select");
+    const templateLabel = document.getElementById("template-label");
+    // The templates come from templates_config.py, through the server.
+    const TEMPLATES = {{ templates|tojson }};
+    const DEFAULT_TEMPLATE_NAME = {{ default_template|tojson }};
     const MAX_BODY_LENGTH = {{ max_body_length }};
     const ENHANCEMENTS_HEADING = "## Enhancements";
     const suggestionChips = document.getElementById("suggestion-chips");
@@ -113,6 +127,7 @@
     let enhanceRequestNumber = 0;
     let notes = [];
     let selectedNoteId = null;
+    let currentTemplateName = DEFAULT_TEMPLATE_NAME;
     let savedTitle = "";
     let savedBody = "";
 
@@ -190,6 +205,8 @@
     // Put a note in the editor, replacing whatever is there.
     function showNoteInEditor(note) {
       selectedNoteId = note.id;
+      currentTemplateName = note.template;
+      updateTemplateLabel();
       titleInput.value = note.title;
       bodyInput.value = note.body;
       rememberSavedEditorText();
@@ -199,12 +216,32 @@
       requestSuggestions();
     }
 
-    // Clear the editor so the next Save creates a new note.
-    function clearEditor() {
+    // Return the template with a given name.
+    function findTemplate(templateName) {
+      for (const template of TEMPLATES) {
+        if (template.name === templateName) {
+          return template;
+        }
+      }
+      return null;
+    }
+
+    // Show the current note's template. An unknown name behaves like the default
+    // template, so it is shown as that.
+    function updateTemplateLabel() {
+      const template = findTemplate(currentTemplateName) || findTemplate(DEFAULT_TEMPLATE_NAME);
+      templateLabel.textContent = "Template: " + template.label;
+    }
+
+    // Reset the editor to a template's starting text, so the next Save creates a
+    // new note. That text counts as saved, so leaving it untouched needs no prompt.
+    function clearEditor(templateName = DEFAULT_TEMPLATE_NAME) {
       forgetDismissedSuggestions(UNSAVED_NOTE_KEY);
       selectedNoteId = null;
+      currentTemplateName = templateName;
+      updateTemplateLabel();
       titleInput.value = "";
-      bodyInput.value = "";
+      bodyInput.value = findTemplate(templateName).body;
       rememberSavedEditorText();
       deleteButton.disabled = true;
       showStatus("", false);
@@ -233,6 +270,18 @@
       }
     }
 
+    // Handle a choice from the "New from template" dropdown.
+    function startFromTemplate() {
+      const templateName = templateSelect.value;
+
+      // Go back to the prompt text, so the same template can be chosen again.
+      templateSelect.value = "";
+      if (canDiscardEdits()) {
+        cancelEnhancement();
+        clearEditor(templateName);
+      }
+    }
+
     // Load all notes from the server.
     async function loadNotes() {
       try {
@@ -249,6 +298,7 @@
       try {
         let savedNote;
         if (selectedNoteId === null) {
+          payload.template = currentTemplateName;
           savedNote = await callApi("/api/notes", "POST", payload);
           moveUnsavedDismissals(savedNote.id);
         } else {
@@ -530,7 +580,11 @@
         return;
       }
 
-      const payload = { text: bodyInput.value, dismissed: currentDismissedIds() };
+      const payload = {
+        text: bodyInput.value,
+        dismissed: currentDismissedIds(),
+        template: currentTemplateName,
+      };
       try {
         const result = await callApi("/api/suggestions", "POST", payload);
         if (thisRequestNumber === suggestionRequestNumber) {
@@ -548,6 +602,7 @@
     }
 
     document.getElementById("new-button").addEventListener("click", startNewNote);
+    templateSelect.addEventListener("change", startFromTemplate);
     document.getElementById("save-button").addEventListener("click", saveNote);
     deleteButton.addEventListener("click", deleteNote);
     document.getElementById("weather-button").addEventListener("click", addWeather);
@@ -556,6 +611,8 @@
     document.getElementById("discard-button").addEventListener("click", discardPreview);
     linkInput.addEventListener("focus", refreshLinkChoices);
     bodyInput.addEventListener("input", scheduleSuggestions);
+
+    updateTemplateLabel();
 
     loadNotes();
   </script>

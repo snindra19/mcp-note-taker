@@ -328,6 +328,39 @@ class EnhancementsTests(unittest.TestCase):
         self.assertEqual(labels_for("Chicago\n\n## Enhancements\n\n### Link: http://[bad\n"), ["Add current weather for Chicago"])
 
 
+class EnabledTypeTests(unittest.TestCase):
+    BODY = "Chicago tomorrow and https://example.com"
+    WEATHER = "Add weather for Chicago on Nov 2"
+    LINK = "Summarize link example.com"
+
+    def labels_with_types(self, body: str, enabled_types: list[str] | None) -> list[str]:
+        """Return the labels of suggestions limited to some types."""
+        results = s.build_suggestions(body, today=TODAY, enabled_types=enabled_types)
+        labels = []
+        for suggestion in results:
+            labels.append(suggestion["label"])
+        return labels
+
+    def test_filtering_by_type(self) -> None:
+        cases = [
+            (None, [self.WEATHER, self.LINK]),
+            (["weather", "link"], [self.WEATHER, self.LINK]),
+            (["link"], [self.LINK]),
+            (["weather"], [self.WEATHER]),
+            ([], []),
+        ]
+        for enabled_types, expected in cases:
+            with self.subTest(enabled_types=enabled_types):
+                self.assertEqual(self.labels_with_types(self.BODY, enabled_types), expected)
+
+    def test_filtered_types_do_not_use_up_the_limit(self) -> None:
+        body = "Tokyo Paris London Rome Madrid Berlin https://a.example https://b.example"
+        self.assertEqual(
+            self.labels_with_types(body, ["link"]),
+            ["Summarize link a.example", "Summarize link b.example"],
+        )
+
+
 class SuggestionFieldTests(unittest.TestCase):
     def test_forecast_fields(self) -> None:
         result = s.build_suggestions("Chicago on Nov 3", today=TODAY)[0]

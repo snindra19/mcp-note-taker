@@ -129,3 +129,23 @@ Check detection with (no servers, API calls or network):
 ```powershell
 python -m unittest test_suggestions
 ```
+
+### Cycle 5: Templates
+
+- The "New from template" dropdown starts a note with a template's headings:
+
+  | Template | Sections | Suggestions |
+  |---|---|---|
+  | Blank | none | weather and links |
+  | Meeting notes | Date, Attendees, Agenda, Notes, Action items | links |
+  | Travel plan | Destination, Dates, Itinerary, Packing list | weather and links |
+  | Project idea | Summary, Links, Next steps | links |
+
+- The New button starts a Blank note.
+- A small `Template: <name>` label next to the title shows the note's template.
+- Each note stores its template name, and suggestions are filtered by that
+  template's types. Filtered types don't use up any of the 5 suggestion slots.
+  This only affects suggestions: **Add weather** and **Summarize link** work in
+  every note.
+- Templates are defined only in `templates_config.py`. The page receives them
+  from the server when it is rendered.
