@@ -7,27 +7,27 @@ from flask import Flask, jsonify, render_template, request
 import link_safety
 import mcp_client
 import notes_store
+import suggestions
 
 MAX_TITLE_LENGTH = 200
 MAX_BODY_LENGTH = 20000
 MAX_CITY_LENGTH = 100
 LINK_TEXT_LENGTH = 500
 
-# Weather tool failures start with this. It is repeated here because importing
-# weather_server would load the API key into this process.
-WEATHER_ERROR_PREFIX = "Weather error: "
-NO_FORECAST_PREFIX = "No forecast is available"
+# The status code for each weather or client code; any other code is a 502.
+STATUS_FOR_CODE = {
+    "missing_city": 400,
+    "invalid_date": 400,
+    "date_out_of_range": 400,
+    "city_not_found": 404,
+    "rate_limited": 429,
+    "timeout": 504,
+    "server_timeout": 504,
+    "server_start_timeout": 504,
+}
 
-# Which status code each kind of weather failure gets; anything else is a 502.
-WEATHER_ERROR_STATUSES = (
-    ("please enter a city", 400),
-    ("the date must be", 400),
-    ("city not found", 404),
-    ("rate limit", 429),
-    ("timed out", 504),
-    ("did not answer within", 504),
-    ("did not start within", 504),
-)
+# Client codes that mean a server took too long, for link requests.
+TIMEOUT_CODES = ("server_timeout", "server_start_timeout")
 
 app = Flask(__name__)
 
@@ -104,17 +104,6 @@ def delete_note(note_id: str):
     return "", 204
 
 
-def weather_error_status(message: str) -> int:
-    """Return the status code for a weather failure message."""
-    lowered_message = message.lower()
-
-    # Use the first kind of failure that the message mentions.
-    for fragment, status in WEATHER_ERROR_STATUSES:
-        if fragment in lowered_message:
-            return status
-    return 502
-
-
 @app.route("/api/enhance/weather", methods=["POST"])
 def enhance_weather():
     """Get current weather, or a forecast if a date is given, from the weather server."""
@@ -141,27 +130,30 @@ def enhance_weather():
         text, error = mcp_client.call_tool("weather", "get_current_weather", {"city": city})
         label = city
 
+    # A code means there's no weather to insert, including for an out-of-range
+    # date, so the message is returned as an error and never reaches the preview.
+    code, message = mcp_client.split_message_code(error or text)
+    if code:
+        return jsonify({"error": message}), STATUS_FOR_CODE.get(code, 502)
     if error:
-        return jsonify({"error": error}), weather_error_status(error)
-    if text.startswith(WEATHER_ERROR_PREFIX):
-        return jsonify({"error": text}), weather_error_status(text)
-    # There's no weather to insert for an out-of-range date, so don't preview it.
-    if text.startswith(NO_FORECAST_PREFIX):
-        return jsonify({"error": text}), 400
+        return jsonify({"error": error}), 502
 
     return jsonify({"source": "weather", "label": label, "text": text})
 
 
 def fetch_error_response(error: str) -> tuple[str, int]:
     """Turn a fetch failure into a short fixed message and a status code."""
-    # The fetch server's own text can be long and include page or request
-    # details, so it is only used to pick one of these messages.
+    code, _ = mcp_client.split_message_code(error)
+    if code in TIMEOUT_CODES:
+        return "The link took too long to fetch.", 504
+
+    # mcp-server-fetch is third-party and has no codes, so its text is matched
+    # here. That text can be long and include page or request details, so it
+    # only picks one of these fixed messages and is never shown.
     if "autonomous fetching" in error:
         return "This site doesn't allow automated fetching.", 403
     if "not a public address" in error:
         return link_safety.REFUSED_MESSAGE, 400
-    if "did not answer within" in error or "did not start within" in error:
-        return "The link took too long to fetch.", 504
     return "Could not fetch that link.", 502
 
 
@@ -225,6 +217,30 @@ def enhance_link():
         return jsonify({"error": "That link has no readable text."}), 502
 
     return jsonify({"source": "link", "label": url, "text": trim_text(page_text, LINK_TEXT_LENGTH)})
+
+
+@app.route("/api/suggestions", methods=["POST"])
+def get_suggestions():
+    """Return suggestions for the given text; this never calls an MCP server."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
+    text = data.get("text", "")
+    dismissed_ids = data.get("dismissed", [])
+    if not isinstance(text, str):
+        return jsonify({"error": "Text must be text."}), 400
+    if len(text) > MAX_BODY_LENGTH:
+        return jsonify({"error": f"Text must be at most {MAX_BODY_LENGTH} characters."}), 400
+    if not isinstance(dismissed_ids, list):
+        return jsonify({"error": "Dismissed must be a list."}), 400
+
+    # Check each dismissed id, because they come from the browser's storage.
+    for dismissed_id in dismissed_ids:
+        if not isinstance(dismissed_id, str):
+            return jsonify({"error": "Dismissed must be a list of text."}), 400
+
+    return jsonify({"suggestions": suggestions.build_suggestions(text, dismissed_ids=dismissed_ids)})
 
 
 @app.errorhandler(500)

@@ -65,8 +65,9 @@ python mcp_client.py fetch "https://example.com"
   - `get_forecast(city, date)`: high, low and main conditions for a YYYY-MM-DD
     date in the next 5 days; a date outside that range gets a clear message
 - Weather failures (city not found, bad key, timeout, rate limit and others)
-  return a friendly message starting with `Weather error:`. Requests time out
-  after 10 seconds.
+  return a friendly message with a stable code, such as
+  `Weather error [city_not_found]: City not found: X.` Requests time out after
+  10 seconds.
 - `mcp_client.py` starts a server over stdio, lists its tools and calls them,
   with a 20 second overall timeout per call. It also starts the ready-made
   `mcp-server-fetch` server with `python -m mcp_server_fetch`.
@@ -95,3 +96,36 @@ python mcp_client.py fetch "https://example.com"
 
 Try it: run `python app.py`, open a note, enter a city and click **Add weather**,
 then click **Insert** and **Save**.
+
+### Cycle 4: Smart suggestions
+
+- `suggestions.py` scans the note body, leaving out the Enhancements section,
+  using rules only:
+  - URLs (http and https)
+  - cities: a built-in list of about 100 major cities in any letter case, plus
+    anything written as `City, ST` with a capitalized name and a US state code
+  - dates: today, tomorrow, weekday names (the next occurrence, never today),
+    `YYYY-MM-DD` and `Nov 3` or `November 3`
+- It produces up to 5 suggestions, in the order they appear in the note:
+  - `Add weather for Chicago on Nov 3` for a city with a date in the next 5 days
+  - `Add current weather for Chicago` for a city with no usable date
+  - `Summarize link example.com` for each URL
+- A city uses the nearest date in its own sentence or line, or current weather
+  if that date is out of range. If the sentence has no date, it uses the first
+  usable date elsewhere in the note.
+- Anything already in the Enhancements section isn't suggested again.
+- `POST /api/suggestions` returns suggestions for the given text. The page asks
+  after you stop typing for 1.5 seconds.
+- Suggestions appear as chips under the editor. Clicking one runs the enhancement
+  into the preview box, where it still needs Insert. Clicking × dismisses the
+  chip for that note, and this browser remembers it. Only a click calls an MCP
+  server; building suggestions never does.
+- The weather endpoint now sets its status code from a stable code in the tool
+  result instead of reading the message text. `City, ST` searches are sent to
+  OpenWeatherMap as `City,ST,US`, then as written if that city isn't found.
+
+Check detection with (no servers, API calls or network):
+
+```powershell
+python -m unittest test_suggestions
+```

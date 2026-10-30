@@ -11,6 +11,7 @@ safe environment variables, so the key stays out of the fetch server entirely.
 import argparse
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -26,6 +27,25 @@ SERVER_ARGUMENTS = {
     "weather": [str(PROJECT_FOLDER / "weather_server.py")],
     "fetch": ["-m", "mcp_server_fetch"],
 }
+
+# Messages from this client and the weather server carry a stable code, as in
+# "MCP error [server_timeout]: ..." or "Weather error [city_not_found]: ...".
+CODED_MESSAGE_PATTERN = re.compile(
+    r"^(?:MCP error|Weather error|Weather notice) \[([a-z_]+)\]: (.*)$", re.DOTALL
+)
+
+
+def split_message_code(text: str) -> tuple[str | None, str]:
+    """Return (code, plain message) for a coded message, or (None, text) otherwise."""
+    match = CODED_MESSAGE_PATTERN.match(text)
+    if match is None:
+        return None, text
+    return match.group(1), match.group(2)
+
+
+def client_error(code: str, message: str) -> str:
+    """Return a client failure message with its stable code."""
+    return f"MCP error [{code}]: {message}"
 
 
 async def run_on_server(
@@ -61,13 +81,15 @@ def run_with_timeout(
         return result, None
     except asyncio.TimeoutError:
         if progress["started"]:
-            return None, f"The {server_name} server did not answer within {OVERALL_TIMEOUT_SECONDS} seconds."
-        return None, f"The {server_name} server did not start within {OVERALL_TIMEOUT_SECONDS} seconds."
+            message = f"The {server_name} server did not answer within {OVERALL_TIMEOUT_SECONDS} seconds."
+            return None, client_error("server_timeout", message)
+        message = f"The {server_name} server did not start within {OVERALL_TIMEOUT_SECONDS} seconds."
+        return None, client_error("server_start_timeout", message)
     except Exception:
         # Failures can arrive grouped from the SDK's task groups, so this is broad.
         if progress["started"]:
-            return None, f"The call to the {server_name} server failed."
-        return None, f"Could not start the {server_name} server."
+            return None, client_error("call_failed", f"The call to the {server_name} server failed.")
+        return None, client_error("server_start_failed", f"Could not start the {server_name} server.")
 
 
 def list_tools(server_name: str) -> tuple[list[dict] | None, str | None]:
@@ -124,7 +146,7 @@ def print_all_tools() -> int:
         print(f"{server_name} server:")
         tools, error = list_tools(server_name)
         if error:
-            print(f"  Error: {error}")
+            print(f"  {error}")
             exit_code = 1
             continue
         for tool in tools:
@@ -137,7 +159,7 @@ def print_tool_result(server_name: str, tool_name: str, arguments: dict) -> int:
     """Call a tool, print the outcome and return the process exit code."""
     text, error = call_tool(server_name, tool_name, arguments)
     if error:
-        print(f"Error: {error}")
+        print(error)
         return 1
     print(text)
     return 0

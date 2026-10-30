@@ -3,9 +3,13 @@
 This is the only file that reads the API key. Failures return fixed friendly
 messages and never include exception text, because a requests exception can
 contain the full request URL, and that URL contains the key.
+
+Failures look like "Weather error [city_not_found]: City not found: X." The code
+in brackets is stable, so callers can act on it without reading the message.
 """
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,14 +17,14 @@ import requests
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 
+from suggestions import US_STATE_CODES
+
 CURRENT_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
 REQUEST_TIMEOUT_SECONDS = 10
 FORECAST_DAYS = 5
 
-# Every failure message starts with this, so callers can tell failures apart
-# from weather reports and from the "date out of range" message.
-ERROR_PREFIX = "Weather error: "
+CITY_STATE_PATTERN = re.compile(r"^(.+?),\s*([A-Za-z]{2})$")
 
 # Find .env next to this file, whatever folder the server is started from.
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -29,33 +33,64 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 server = MCPServer("weather", log_level="WARNING")
 
 
+def weather_error(code: str, message: str) -> str:
+    """Return a failure message with its stable code."""
+    return f"Weather error [{code}]: {message}"
+
+
+def build_city_queries(city: str) -> list[str]:
+    """Return the city searches to try, in order.
+
+    OpenWeatherMap reads "Rogers, AR" as a country code and only understands US
+    states in the form "Rogers,AR,US". Some state codes are also country codes,
+    as in "Toronto, CA", so the original text is the second search to try.
+    """
+    match = CITY_STATE_PATTERN.match(city)
+    if match is None or match.group(2).upper() not in US_STATE_CODES:
+        return [city]
+    return [f"{match.group(1)},{match.group(2).upper()},US", city]
+
+
+def request_weather(url: str, query: str, city: str, api_key: str) -> tuple[dict | None, str | None, bool]:
+    """Make one API request; return (data, error message or None, whether it was a 404)."""
+    query_params = {"q": query, "appid": api_key, "units": "imperial"}
+    try:
+        response = requests.get(url, params=query_params, timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.Timeout:
+        return None, weather_error("timeout", "The weather service timed out. Please try again."), False
+    except requests.RequestException:
+        return None, weather_error("unreachable", "Could not reach the weather service."), False
+
+    if response.status_code == 401:
+        return None, weather_error("invalid_key", "The API key was rejected. It may be wrong or not active yet."), False
+    if response.status_code == 404:
+        return None, weather_error("city_not_found", f"City not found: {city}."), True
+    if response.status_code == 429:
+        return None, weather_error("rate_limited", "The free plan's rate limit was reached. Please try again later."), False
+    if response.status_code != 200:
+        return None, weather_error("service_error", "The weather service returned an unexpected response."), False
+
+    try:
+        return response.json(), None, False
+    except ValueError:
+        return None, weather_error("bad_response", "The weather service returned an unreadable response."), False
+
+
 def call_openweather(url: str, city: str) -> tuple[dict | None, str | None]:
     """Call an OpenWeatherMap endpoint; return (data, error message or None)."""
     api_key = os.getenv("OPENWEATHER_API_KEY", "").strip()
     if not api_key:
-        return None, ERROR_PREFIX + "the API key is not set in .env."
+        return None, weather_error("missing_key", "The API key is not set in .env.")
 
-    query_params = {"q": city, "appid": api_key, "units": "imperial"}
-    try:
-        response = requests.get(url, params=query_params, timeout=REQUEST_TIMEOUT_SECONDS)
-    except requests.Timeout:
-        return None, ERROR_PREFIX + "the weather service timed out. Please try again."
-    except requests.RequestException:
-        return None, ERROR_PREFIX + "could not reach the weather service."
+    data = None
+    error = None
 
-    if response.status_code == 401:
-        return None, ERROR_PREFIX + "the API key was rejected. It may be wrong or not active yet."
-    if response.status_code == 404:
-        return None, ERROR_PREFIX + f"city not found: {city}."
-    if response.status_code == 429:
-        return None, ERROR_PREFIX + "the free plan's rate limit was reached. Please try again later."
-    if response.status_code != 200:
-        return None, ERROR_PREFIX + "the weather service returned an unexpected response."
-
-    try:
-        return response.json(), None
-    except ValueError:
-        return None, ERROR_PREFIX + "the weather service returned an unreadable response."
+    # Try each search, moving to the next only if the city wasn't found.
+    for query in build_city_queries(city):
+        data, error, was_not_found = request_weather(url, query, city, api_key)
+        if not was_not_found:
+            break
+    return data, error
 
 
 def format_current_weather(data: dict) -> str:
@@ -93,8 +128,11 @@ def is_date_in_forecast_range(target_date: datetime.date) -> bool:
 
 
 def out_of_range_message(date_text: str) -> str:
-    """Return the message for a date the forecast doesn't cover."""
-    return f"No forecast is available for {date_text}. The forecast only covers the next {FORECAST_DAYS} days."
+    """Return the message for a date the forecast doesn't cover; this isn't a failure."""
+    return (
+        f"Weather notice [date_out_of_range]: No forecast is available for {date_text}. "
+        f"The forecast only covers the next {FORECAST_DAYS} days."
+    )
 
 
 def find_entries_for_date(data: dict, target_date: datetime.date) -> list[dict]:
@@ -149,7 +187,7 @@ def get_current_weather(city: str) -> str:
     """Get the current weather for a city, in imperial units."""
     city = city.strip()
     if not city:
-        return ERROR_PREFIX + "please enter a city."
+        return weather_error("missing_city", "Please enter a city.")
 
     data, error = call_openweather(CURRENT_WEATHER_URL, city)
     if error:
@@ -158,7 +196,7 @@ def get_current_weather(city: str) -> str:
     try:
         return format_current_weather(data)
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
-        return ERROR_PREFIX + "the weather service returned an unexpected response."
+        return weather_error("bad_response", "The weather service returned an unexpected response.")
 
 
 @server.tool()
@@ -167,12 +205,12 @@ def get_forecast(city: str, date: str) -> str:
     city = city.strip()
     date = date.strip()
     if not city:
-        return ERROR_PREFIX + "please enter a city."
+        return weather_error("missing_city", "Please enter a city.")
 
     try:
         target_date = parse_date(date)
     except ValueError:
-        return ERROR_PREFIX + "the date must be a real date in YYYY-MM-DD form."
+        return weather_error("invalid_date", "The date must be a real date in YYYY-MM-DD form.")
 
     # Answer out-of-range dates without using an API call.
     if not is_date_in_forecast_range(target_date):
@@ -185,7 +223,7 @@ def get_forecast(city: str, date: str) -> str:
     try:
         return format_forecast(data, target_date)
     except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError, OSError):
-        return ERROR_PREFIX + "the weather service returned an unexpected response."
+        return weather_error("bad_response", "The weather service returned an unexpected response.")
 
 
 if __name__ == "__main__":

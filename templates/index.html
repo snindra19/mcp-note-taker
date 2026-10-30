@@ -26,6 +26,13 @@
     .enhance-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     .enhance-row input { flex: 1; width: auto; min-width: 140px; }
     .enhance-row input[type="date"] { flex: 0 0 auto; min-width: 0; }
+    #suggestion-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    #suggestion-chips:empty { display: none; }
+    .chip { display: inline-flex; max-width: 100%; font-size: 13px; background: #dbe7ee; border-radius: 12px; }
+    .chip button { padding: 4px 8px; font: inherit; background: none; border: none; cursor: pointer; }
+    .chip-label { overflow-wrap: anywhere; text-align: left; }
+    .chip-dismiss { flex-shrink: 0; }
+    .chip button:hover { text-decoration: underline; }
     #preview-box { padding: 10px; background: #fff; border: 1px solid #2f4858; border-radius: 4px; }
     #preview-box[hidden] { display: none; }
     #preview-heading { margin-bottom: 6px; font-size: 14px; font-weight: bold; overflow-wrap: anywhere; }
@@ -48,6 +55,7 @@
         <label for="note-body">Body</label>
         <textarea id="note-body" maxlength="{{ max_body_length }}"></textarea>
       </div>
+      <div id="suggestion-chips"></div>
       <div class="actions">
         <button id="save-button" type="button">Save</button>
         <button id="delete-button" type="button" disabled>Delete</button>
@@ -90,7 +98,16 @@
 
     const MAX_BODY_LENGTH = {{ max_body_length }};
     const ENHANCEMENTS_HEADING = "## Enhancements";
+    const suggestionChips = document.getElementById("suggestion-chips");
+    const SUGGESTION_DELAY_MS = 1500;
+    const DISMISSED_STORAGE_KEY = "dismissedSuggestions";
+    // Dismissed chips for a note that hasn't been saved yet are kept under this.
+    const UNSAVED_NOTE_KEY = "unsaved";
 
+    let suggestionTimer = null;
+    // Raised by each suggestion request, so a late answer can be ignored.
+    let suggestionRequestNumber = 0;
+    let dismissedSuggestions = loadDismissedSuggestions();
     let previewResult = null;
     // Raised by each new request or note change, so a late answer can be ignored.
     let enhanceRequestNumber = 0;
@@ -179,10 +196,12 @@
       deleteButton.disabled = false;
       showStatus("", false);
       renderNoteList();
+      requestSuggestions();
     }
 
     // Clear the editor so the next Save creates a new note.
     function clearEditor() {
+      forgetDismissedSuggestions(UNSAVED_NOTE_KEY);
       selectedNoteId = null;
       titleInput.value = "";
       bodyInput.value = "";
@@ -190,6 +209,7 @@
       deleteButton.disabled = true;
       showStatus("", false);
       renderNoteList();
+      requestSuggestions();
       titleInput.focus();
     }
 
@@ -230,6 +250,7 @@
         let savedNote;
         if (selectedNoteId === null) {
           savedNote = await callApi("/api/notes", "POST", payload);
+          moveUnsavedDismissals(savedNote.id);
         } else {
           savedNote = await callApi("/api/notes/" + selectedNoteId, "PUT", payload);
         }
@@ -251,6 +272,7 @@
       }
       try {
         await callApi("/api/notes/" + selectedNoteId, "DELETE");
+        forgetDismissedSuggestions(selectedNoteId);
         cancelEnhancement();
         clearEditor();
         await loadNotes();
@@ -381,12 +403,148 @@
       bodyInput.value = newBody;
       hidePreview();
       showStatus("Inserted. Click Save to keep it.", false);
+      requestSuggestions();
     }
 
     // Throw away the previewed result when the user clicks Discard.
     function discardPreview() {
       hidePreview();
       showStatus("", false);
+    }
+
+    // Read dismissed chips from the browser; storage can be blocked or hold bad data.
+    function loadDismissedSuggestions() {
+      try {
+        const storedValue = JSON.parse(localStorage.getItem(DISMISSED_STORAGE_KEY));
+        if (storedValue !== null && typeof storedValue === "object" && !Array.isArray(storedValue)) {
+          return storedValue;
+        }
+      } catch (storageError) {
+        // Fall through and start with nothing dismissed.
+      }
+      return {};
+    }
+
+    // Write dismissed chips to the browser; if that fails they last until reload.
+    function saveDismissedSuggestions() {
+      try {
+        localStorage.setItem(DISMISSED_STORAGE_KEY, JSON.stringify(dismissedSuggestions));
+      } catch (storageError) {
+        // Nothing else to do: dismissals still work for this page load.
+      }
+    }
+
+    // Return the key that the current note's dismissed chips are kept under.
+    function currentNoteKey() {
+      return selectedNoteId === null ? UNSAVED_NOTE_KEY : selectedNoteId;
+    }
+
+    // Return the ids of the current note's dismissed chips.
+    function currentDismissedIds() {
+      const dismissedIds = dismissedSuggestions[currentNoteKey()];
+      return Array.isArray(dismissedIds) ? dismissedIds : [];
+    }
+
+    // Forget the dismissed chips kept under a key.
+    function forgetDismissedSuggestions(noteKey) {
+      delete dismissedSuggestions[noteKey];
+      saveDismissedSuggestions();
+    }
+
+    // Keep a new note's dismissed chips once it has been saved and has an id.
+    function moveUnsavedDismissals(savedNoteId) {
+      const unsavedIds = dismissedSuggestions[UNSAVED_NOTE_KEY];
+      if (unsavedIds) {
+        dismissedSuggestions[savedNoteId] = unsavedIds;
+      }
+      forgetDismissedSuggestions(UNSAVED_NOTE_KEY);
+    }
+
+    // Hide a chip for the current note, then ask again so another can take its place.
+    function dismissSuggestion(suggestion) {
+      const dismissedIds = currentDismissedIds();
+      dismissedIds.push(suggestion.id);
+      dismissedSuggestions[currentNoteKey()] = dismissedIds;
+      saveDismissedSuggestions();
+      requestSuggestions();
+    }
+
+    // Run a clicked chip's enhancement into the preview box.
+    function runSuggestion(suggestion) {
+      if (suggestion.type === "weather") {
+        const payload = { city: suggestion.city, date: suggestion.date };
+        requestEnhancement("/api/enhance/weather", payload, "Getting weather...");
+      } else {
+        requestEnhancement("/api/enhance/link", { url: suggestion.url }, "Getting link...");
+      }
+    }
+
+    // Draw one chip; textContent keeps text from the note from being run as HTML.
+    function createChip(suggestion) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+
+      const runButton = document.createElement("button");
+      runButton.type = "button";
+      runButton.className = "chip-label";
+      runButton.textContent = suggestion.label;
+      if (suggestion.url) {
+        runButton.title = suggestion.url;
+      }
+      runButton.addEventListener("click", function () {
+        runSuggestion(suggestion);
+      });
+
+      const dismissButton = document.createElement("button");
+      dismissButton.type = "button";
+      dismissButton.className = "chip-dismiss";
+      dismissButton.textContent = "×";
+      dismissButton.setAttribute("aria-label", "Dismiss: " + suggestion.label);
+      dismissButton.addEventListener("click", function () {
+        dismissSuggestion(suggestion);
+      });
+
+      chip.appendChild(runButton);
+      chip.appendChild(dismissButton);
+      return chip;
+    }
+
+    // Replace the chips with a new list of suggestions.
+    function renderSuggestions(suggestions) {
+      suggestionChips.textContent = "";
+
+      // Add one chip per suggestion.
+      for (const suggestion of suggestions) {
+        suggestionChips.appendChild(createChip(suggestion));
+      }
+    }
+
+    // Ask the server for suggestions now. This only reads the text; no MCP server is called.
+    async function requestSuggestions() {
+      clearTimeout(suggestionTimer);
+      suggestionRequestNumber += 1;
+      const thisRequestNumber = suggestionRequestNumber;
+
+      if (bodyInput.value.trim() === "") {
+        renderSuggestions([]);
+        return;
+      }
+
+      const payload = { text: bodyInput.value, dismissed: currentDismissedIds() };
+      try {
+        const result = await callApi("/api/suggestions", "POST", payload);
+        if (thisRequestNumber === suggestionRequestNumber) {
+          renderSuggestions(result.suggestions);
+        }
+      } catch (error) {
+        // Chips are optional, so a failure leaves the current ones and shows nothing.
+      }
+    }
+
+    // Ask for suggestions once the user has stopped typing for 1.5 seconds.
+    function scheduleSuggestions() {
+      clearTimeout(suggestionTimer);
+      suggestionTimer = setTimeout(requestSuggestions, SUGGESTION_DELAY_MS);
     }
 
     document.getElementById("new-button").addEventListener("click", startNewNote);
@@ -397,6 +555,7 @@
     document.getElementById("insert-button").addEventListener("click", insertPreview);
     document.getElementById("discard-button").addEventListener("click", discardPreview);
     linkInput.addEventListener("focus", refreshLinkChoices);
+    bodyInput.addEventListener("input", scheduleSuggestions);
 
     loadNotes();
   </script>
