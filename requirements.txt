@@ -1,0 +1,5 @@
+flask
+mcp
+mcp-server-fetch
+requests
+python-dotenv

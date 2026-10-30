@@ -1,0 +1,27 @@
+# Python defaults
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+
+# Secrets (.env.example is intentionally not matched and is committed)
+.env
+
+# Local app data
+notes.json
+
+# Local project instructions
+REQUIREMENTS.md
