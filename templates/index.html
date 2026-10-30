@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Note Taker</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; color: #222; background: #f4f4f4; }
+    h1 { margin: 0; padding: 12px 16px; font-size: 20px; color: #fff; background: #2f4858; }
+    .layout { display: flex; height: calc(100vh - 47px); }
+    .sidebar { width: 280px; flex-shrink: 0; padding: 12px; overflow-y: auto; background: #fff; border-right: 1px solid #ccc; }
+    .editor { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 16px; min-width: 0; }
+    #note-list { list-style: none; margin: 12px 0 0; padding: 0; }
+    #note-list button { width: 100%; padding: 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; background: none; border: none; border-bottom: 1px solid #eee; cursor: pointer; }
+    #note-list button:hover { background: #eef3f6; }
+    #note-list button.selected { font-weight: bold; background: #dbe7ee; }
+    label { font-size: 14px; font-weight: bold; }
+    input, textarea { width: 100%; padding: 8px; font: inherit; border: 1px solid #aaa; border-radius: 4px; }
+    .body-field { flex: 1; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+    textarea { flex: 1; resize: none; }
+    .actions { display: flex; align-items: center; gap: 8px; }
+    .actions button, #new-button { padding: 8px 14px; font: inherit; cursor: pointer; }
+    #status { font-size: 14px; }
+    #status.error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>Smart Note Taker</h1>
+  <div class="layout">
+    <aside class="sidebar">
+      <button id="new-button" type="button">New</button>
+      <ul id="note-list"></ul>
+    </aside>
+    <main class="editor">
+      <div>
+        <label for="note-title">Title</label>
+        <input id="note-title" type="text" maxlength="{{ max_title_length }}">
+      </div>
+      <div class="body-field">
+        <label for="note-body">Body</label>
+        <textarea id="note-body" maxlength="{{ max_body_length }}"></textarea>
+      </div>
+      <div class="actions">
+        <button id="save-button" type="button">Save</button>
+        <button id="delete-button" type="button" disabled>Delete</button>
+        <span id="status" role="status"></span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const noteList = document.getElementById("note-list");
+    const titleInput = document.getElementById("note-title");
+    const bodyInput = document.getElementById("note-body");
+    const deleteButton = document.getElementById("delete-button");
+    const statusText = document.getElementById("status");
+
+    let notes = [];
+    let selectedNoteId = null;
+    let savedTitle = "";
+    let savedBody = "";
+
+    // Record what the editor holds now as the saved version.
+    function rememberSavedEditorText() {
+      savedTitle = titleInput.value;
+      savedBody = bodyInput.value;
+    }
+
+    // Return true if there is nothing unsaved, or the user agrees to lose it.
+    function canDiscardEdits() {
+      const hasUnsavedEdits = titleInput.value !== savedTitle || bodyInput.value !== savedBody;
+      if (!hasUnsavedEdits) {
+        return true;
+      }
+      return window.confirm("Discard unsaved changes?");
+    }
+
+    // Show a success or error message next to the buttons.
+    function showStatus(message, isError) {
+      statusText.textContent = message;
+      statusText.className = isError ? "error" : "";
+    }
+
+    // Call the API and return parsed JSON; throw an Error with a short message on failure.
+    async function callApi(url, method, payload) {
+      const options = { method: method };
+      if (payload !== undefined) {
+        options.headers = { "Content-Type": "application/json" };
+        options.body = JSON.stringify(payload);
+      }
+
+      const response = await fetch(url, options);
+      if (response.status === 204) {
+        return null;
+      }
+
+      // A server failure may not return JSON, so parsing is allowed to fail.
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        data = null;
+      }
+
+      if (!response.ok) {
+        const message = data && data.error ? data.error : "The request failed.";
+        throw new Error(message);
+      }
+      return data;
+    }
+
+    // Draw the note list; textContent keeps note titles from being run as HTML.
+    function renderNoteList() {
+      noteList.textContent = "";
+
+      // Add one button per note.
+      for (const note of notes) {
+        const listItem = document.createElement("li");
+        const noteButton = document.createElement("button");
+        noteButton.type = "button";
+        noteButton.textContent = note.title;
+        noteButton.title = note.title;
+        if (note.id === selectedNoteId) {
+          noteButton.className = "selected";
+        }
+        noteButton.addEventListener("click", function () {
+          switchToNote(note);
+        });
+        listItem.appendChild(noteButton);
+        noteList.appendChild(listItem);
+      }
+    }
+
+    // Put a note in the editor, replacing whatever is there.
+    function showNoteInEditor(note) {
+      selectedNoteId = note.id;
+      titleInput.value = note.title;
+      bodyInput.value = note.body;
+      rememberSavedEditorText();
+      deleteButton.disabled = false;
+      showStatus("", false);
+      renderNoteList();
+    }
+
+    // Clear the editor so the next Save creates a new note.
+    function clearEditor() {
+      selectedNoteId = null;
+      titleInput.value = "";
+      bodyInput.value = "";
+      rememberSavedEditorText();
+      deleteButton.disabled = true;
+      showStatus("", false);
+      renderNoteList();
+      titleInput.focus();
+    }
+
+    // Handle a click on a note in the list.
+    function switchToNote(note) {
+      // Clicking the note already open would change nothing, so don't ask.
+      if (note.id === selectedNoteId) {
+        return;
+      }
+      if (canDiscardEdits()) {
+        showNoteInEditor(note);
+      }
+    }
+
+    // Handle a click on the New button.
+    function startNewNote() {
+      if (canDiscardEdits()) {
+        clearEditor();
+      }
+    }
+
+    // Load all notes from the server.
+    async function loadNotes() {
+      try {
+        notes = await callApi("/api/notes", "GET");
+        renderNoteList();
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    }
+
+    // Create a new note or update the selected one.
+    async function saveNote() {
+      const payload = { title: titleInput.value, body: bodyInput.value };
+      try {
+        let savedNote;
+        if (selectedNoteId === null) {
+          savedNote = await callApi("/api/notes", "POST", payload);
+        } else {
+          savedNote = await callApi("/api/notes/" + selectedNoteId, "PUT", payload);
+        }
+        await loadNotes();
+        showNoteInEditor(savedNote);
+        showStatus("Saved.", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    }
+
+    // Delete the selected note after the user confirms.
+    async function deleteNote() {
+      if (selectedNoteId === null) {
+        return;
+      }
+      if (!window.confirm("Delete this note?")) {
+        return;
+      }
+      try {
+        await callApi("/api/notes/" + selectedNoteId, "DELETE");
+        clearEditor();
+        await loadNotes();
+        showStatus("Deleted.", false);
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    }
+
+    document.getElementById("new-button").addEventListener("click", startNewNote);
+    document.getElementById("save-button").addEventListener("click", saveNote);
+    deleteButton.addEventListener("click", deleteNote);
+
+    loadNotes();
+  </script>
+</body>
+</html>
