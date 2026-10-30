@@ -10,19 +10,26 @@
     h1 { margin: 0; padding: 12px 16px; font-size: 20px; color: #fff; background: #2f4858; }
     .layout { display: flex; height: calc(100vh - 47px); }
     .sidebar { width: 280px; flex-shrink: 0; padding: 12px; overflow-y: auto; background: #fff; border-right: 1px solid #ccc; }
-    .editor { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 16px; min-width: 0; }
+    .editor { flex: 1; display: flex; flex-direction: column; gap: 10px; padding: 16px; min-width: 0; overflow-y: auto; }
     #note-list { list-style: none; margin: 12px 0 0; padding: 0; }
     #note-list button { width: 100%; padding: 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; background: none; border: none; border-bottom: 1px solid #eee; cursor: pointer; }
     #note-list button:hover { background: #eef3f6; }
     #note-list button.selected { font-weight: bold; background: #dbe7ee; }
     label { font-size: 14px; font-weight: bold; }
     input, textarea { width: 100%; padding: 8px; font: inherit; border: 1px solid #aaa; border-radius: 4px; }
-    .body-field { flex: 1; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+    .body-field { flex: 1; display: flex; flex-direction: column; gap: 4px; min-height: 180px; }
     textarea { flex: 1; resize: none; }
     .actions { display: flex; align-items: center; gap: 8px; }
-    .actions button, #new-button { padding: 8px 14px; font: inherit; cursor: pointer; }
+    .actions button, .enhance-row button, #new-button { padding: 8px 14px; font: inherit; cursor: pointer; }
     #status { font-size: 14px; }
     #status.error { color: #b00020; }
+    .enhance-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .enhance-row input { flex: 1; width: auto; min-width: 140px; }
+    .enhance-row input[type="date"] { flex: 0 0 auto; min-width: 0; }
+    #preview-box { padding: 10px; background: #fff; border: 1px solid #2f4858; border-radius: 4px; }
+    #preview-box[hidden] { display: none; }
+    #preview-heading { margin-bottom: 6px; font-size: 14px; font-weight: bold; overflow-wrap: anywhere; }
+    #preview-text { max-height: 140px; margin-bottom: 8px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -46,6 +53,24 @@
         <button id="delete-button" type="button" disabled>Delete</button>
         <span id="status" role="status"></span>
       </div>
+      <div class="enhance-row">
+        <input id="weather-city" type="text" placeholder="City" aria-label="City for weather" maxlength="{{ max_city_length }}">
+        <input id="weather-date" type="date" aria-label="Optional date for weather">
+        <button id="weather-button" type="button">Add weather</button>
+      </div>
+      <div class="enhance-row">
+        <input id="link-url" type="text" list="link-choices" placeholder="https://..." aria-label="Link to summarize">
+        <datalist id="link-choices"></datalist>
+        <button id="link-button" type="button">Summarize link</button>
+      </div>
+      <div id="preview-box" hidden>
+        <div id="preview-heading"></div>
+        <div id="preview-text"></div>
+        <div class="actions">
+          <button id="insert-button" type="button">Insert</button>
+          <button id="discard-button" type="button">Discard</button>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -55,7 +80,20 @@
     const bodyInput = document.getElementById("note-body");
     const deleteButton = document.getElementById("delete-button");
     const statusText = document.getElementById("status");
+    const cityInput = document.getElementById("weather-city");
+    const dateInput = document.getElementById("weather-date");
+    const linkInput = document.getElementById("link-url");
+    const linkChoices = document.getElementById("link-choices");
+    const previewBox = document.getElementById("preview-box");
+    const previewHeading = document.getElementById("preview-heading");
+    const previewText = document.getElementById("preview-text");
 
+    const MAX_BODY_LENGTH = {{ max_body_length }};
+    const ENHANCEMENTS_HEADING = "## Enhancements";
+
+    let previewResult = null;
+    // Raised by each new request or note change, so a late answer can be ignored.
+    let enhanceRequestNumber = 0;
     let notes = [];
     let selectedNoteId = null;
     let savedTitle = "";
@@ -162,6 +200,7 @@
         return;
       }
       if (canDiscardEdits()) {
+        cancelEnhancement();
         showNoteInEditor(note);
       }
     }
@@ -169,6 +208,7 @@
     // Handle a click on the New button.
     function startNewNote() {
       if (canDiscardEdits()) {
+        cancelEnhancement();
         clearEditor();
       }
     }
@@ -211,6 +251,7 @@
       }
       try {
         await callApi("/api/notes/" + selectedNoteId, "DELETE");
+        cancelEnhancement();
         clearEditor();
         await loadNotes();
         showStatus("Deleted.", false);
@@ -219,9 +260,143 @@
       }
     }
 
+    // Hide the preview box and forget its result.
+    function hidePreview() {
+      previewResult = null;
+      previewBox.hidden = true;
+    }
+
+    // Close the preview and ignore any answer still on its way, so a result
+    // can't land in a different note from the one it was requested for.
+    function cancelEnhancement() {
+      enhanceRequestNumber += 1;
+      hidePreview();
+    }
+
+    // Show an enhancement result; textContent keeps page text from being run as HTML.
+    function showPreview(result) {
+      previewResult = result;
+      previewHeading.textContent = buildEnhancementHeading(result);
+      previewText.textContent = result.text;
+      previewBox.hidden = false;
+    }
+
+    // Ask the server for an enhancement and show the answer in the preview box.
+    async function requestEnhancement(url, payload, waitingMessage) {
+      cancelEnhancement();
+      const thisRequestNumber = enhanceRequestNumber;
+      showStatus(waitingMessage, false);
+
+      try {
+        const result = await callApi(url, "POST", payload);
+        if (thisRequestNumber === enhanceRequestNumber) {
+          showPreview(result);
+          showStatus("Choose Insert or Discard.", false);
+        }
+      } catch (error) {
+        if (thisRequestNumber === enhanceRequestNumber) {
+          showStatus(error.message, true);
+        }
+      }
+    }
+
+    // Handle a click on Add weather.
+    function addWeather() {
+      const payload = { city: cityInput.value, date: dateInput.value };
+      requestEnhancement("/api/enhance/weather", payload, "Getting weather...");
+    }
+
+    // Handle a click on Summarize link.
+    function summarizeLink() {
+      const payload = { url: linkInput.value };
+      requestEnhancement("/api/enhance/link", payload, "Getting link...");
+    }
+
+    // Offer the links found in the note body as choices for the link box.
+    function refreshLinkChoices() {
+      const foundLinks = bodyInput.value.match(/https?:\/\/[^\s<>"]+/gi) || [];
+      const uniqueLinks = new Set();
+
+      // Remove punctuation that ends a sentence rather than the link.
+      for (const foundLink of foundLinks) {
+        uniqueLinks.add(foundLink.replace(/[.,;:!?)\]}']+$/, ""));
+      }
+
+      // Add one choice per link.
+      linkChoices.textContent = "";
+      for (const link of uniqueLinks) {
+        const choice = document.createElement("option");
+        choice.value = link;
+        linkChoices.appendChild(choice);
+      }
+    }
+
+    // Return the current local time as YYYY-MM-DD HH:MM.
+    function formatCurrentTime() {
+      const now = new Date();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      const hours = String(now.getHours()).padStart(2, "0");
+      const minutes = String(now.getMinutes()).padStart(2, "0");
+      return now.getFullYear() + "-" + month + "-" + day + " " + hours + ":" + minutes;
+    }
+
+    // Return the heading line for a result, such as "Weather: Chicago".
+    function buildEnhancementHeading(result) {
+      const sourceName = result.source === "weather" ? "Weather" : "Link";
+      return sourceName + ": " + result.label;
+    }
+
+    // Return the note body with a result added to its Enhancements section.
+    function addToEnhancements(body, result) {
+      let newBody = body.trimEnd();
+
+      // Start the section if the note doesn't have one yet.
+      if (!/^## Enhancements[ \t]*$/m.test(body)) {
+        if (newBody !== "") {
+          newBody += "\n\n";
+        }
+        newBody += ENHANCEMENTS_HEADING;
+      }
+
+      // The section is always last, so a new entry goes at the very end.
+      newBody += "\n\n### " + buildEnhancementHeading(result);
+      newBody += "\nSource: " + result.source + " | Added: " + formatCurrentTime();
+      newBody += "\n\n" + result.text;
+      return newBody;
+    }
+
+    // Add the previewed result to the note body when the user clicks Insert.
+    function insertPreview() {
+      if (previewResult === null) {
+        return;
+      }
+
+      const newBody = addToEnhancements(bodyInput.value, previewResult);
+      if (newBody.length > MAX_BODY_LENGTH) {
+        showStatus("This would make the note longer than " + MAX_BODY_LENGTH + " characters.", true);
+        return;
+      }
+
+      bodyInput.value = newBody;
+      hidePreview();
+      showStatus("Inserted. Click Save to keep it.", false);
+    }
+
+    // Throw away the previewed result when the user clicks Discard.
+    function discardPreview() {
+      hidePreview();
+      showStatus("", false);
+    }
+
     document.getElementById("new-button").addEventListener("click", startNewNote);
     document.getElementById("save-button").addEventListener("click", saveNote);
     deleteButton.addEventListener("click", deleteNote);
+    document.getElementById("weather-button").addEventListener("click", addWeather);
+    document.getElementById("link-button").addEventListener("click", summarizeLink);
+    document.getElementById("insert-button").addEventListener("click", insertPreview);
+    document.getElementById("discard-button").addEventListener("click", discardPreview);
+    linkInput.addEventListener("focus", refreshLinkChoices);
 
     loadNotes();
   </script>

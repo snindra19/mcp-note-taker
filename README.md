@@ -72,3 +72,26 @@ python mcp_client.py fetch "https://example.com"
   `mcp-server-fetch` server with `python -m mcp_server_fetch`.
 - Only `weather_server.py` reads `OPENWEATHER_API_KEY`. The client doesn't pass
   it to either server, and it never appears in tool results or logs.
+
+### Cycle 3: Enhance notes
+
+- The editor has two new actions:
+  - **Add weather:** enter a city and an optional date. Without a date you get
+    current weather; with one you get that day's forecast.
+  - **Summarize link:** enter a URL or pick one found in the note. You get the
+    page's text, trimmed to about 500 characters.
+- Results appear in a preview box, and nothing changes until you click Insert
+  or Discard. Insert adds the result to an `## Enhancements` section at the end
+  of the note body, with its source and the time added. Click Save to keep it.
+- `POST /api/enhance/weather` and `POST /api/enhance/link` call the MCP client
+  and return JSON. Errors return a short message and a matching status code,
+  never a stack trace.
+- `link_safety.py` allows only http and https links. It resolves the hostname
+  and refuses localhost, loopback, private and link-local addresses, so a note
+  can't reach local services. The fetch server also refuses these addresses
+  itself, including on redirects.
+- `python app.py` no longer loads `.env`, so the API key stays out of the Flask
+  process.
+
+Try it: run `python app.py`, open a note, enter a city and click **Add weather**,
+then click **Insert** and **Save**.
